@@ -1,4 +1,4 @@
-package com.example.neo4j;
+package com.mappedsky.neo4j;
 
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;

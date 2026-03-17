@@ -1,4 +1,4 @@
-package com.example.neo4j;
+package com.mappedsky.neo4j;
 
 /**
  * Thrown from {@link ReadOnlyTransactionEventListener#beforeCommit} when a user

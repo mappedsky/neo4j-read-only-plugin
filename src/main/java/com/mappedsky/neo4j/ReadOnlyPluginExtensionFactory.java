@@ -1,4 +1,4 @@
-package com.example.neo4j;
+package com.mappedsky.neo4j;
 
 import org.neo4j.annotations.service.ServiceProvider;
 import org.neo4j.dbms.api.DatabaseManagementService;
