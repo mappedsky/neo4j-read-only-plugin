@@ -18,4 +18,5 @@ RUN mvn package -DskipTests -q
 CMD ["mvn", \
      "failsafe:integration-test", \
      "failsafe:verify", \
-     "-Dplugin.jar.path=/dev/null"]
+     "-Dplugin.jar.path=/dev/null", \
+     "-Dagent.jar.path=/dev/null"]

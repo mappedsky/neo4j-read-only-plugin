@@ -43,6 +43,8 @@ public final class ContainerSetup {
     static final String SVC_RW_USER  = "svc_rw";
     /** Blocked – {@code _rw} appears mid-name, not as suffix. */
     static final String SVC_RW_EXTRA = "svc_rw_extra";
+    /** Allowed to run admin commands on system DB – username ends with {@code _admin}. */
+    static final String ADMIN_SUFFIX_USER = "alice_admin";
 
     // ── Shared state ─────────────────────────────────────────────────────────
 
@@ -77,13 +79,21 @@ public final class ContainerSetup {
             String pluginJar = System.getProperty(
                     "plugin.jar.path",
                     "target/neo4j-read-only-plugin-1.0.0-SNAPSHOT-plugin.jar");
+            String agentJar = System.getProperty(
+                    "agent.jar.path",
+                    "target/neo4j-read-only-plugin-1.0.0-SNAPSHOT-agent.jar");
 
             Neo4jContainer<?> c = new Neo4jContainer<>("neo4j:5.20.0")
                     .withAdminPassword(ADMIN_PASSWORD)
                     .withCopyToContainer(
                             MountableFile.forHostPath(Paths.get(pluginJar), 0644),
                             "/var/lib/neo4j/plugins/neo4j-read-only-plugin.jar")
-                    .withEnv("NEO4J_dbms_security_procedures_unrestricted", "*");
+                    .withCopyToContainer(
+                            MountableFile.forHostPath(Paths.get(agentJar), 0644),
+                            "/var/lib/neo4j/plugins/system-guard-agent.jar")
+                    .withEnv("NEO4J_dbms_security_procedures_unrestricted", "*")
+                    .withEnv("NEO4J_server_jvm_additional",
+                             "-javaagent:/var/lib/neo4j/plugins/system-guard-agent.jar");
             c.start();
             resolvedContainer = c;
             resolvedBoltUrl   = c.getBoltUrl();
@@ -101,12 +111,15 @@ public final class ContainerSetup {
         }
 
         // Create test users – idempotent (ignore "already exists" errors).
+        // Note: executed as the built-in 'neo4j' admin, which is exempt from the
+        // system-guard agent's _admin suffix check to allow initial bootstrap.
         try (Session sys = ADMIN_DRIVER.session(SessionConfig.forDatabase("system"))) {
-            for (String user : new String[]{RW_USER, RO_USER, SVC_RW_USER, SVC_RW_EXTRA}) {
+            for (String user : new String[]{
+                    RW_USER, RO_USER, SVC_RW_USER, SVC_RW_EXTRA, ADMIN_SUFFIX_USER}) {
                 try {
                     sys.run("CREATE USER " + user
                             + " SET PASSWORD '" + USER_PASSWORD + "'"
-                            + " CHANGE NOT REQUIRED");
+                            + " CHANGE NOT REQUIRED").consume();
                 } catch (Neo4jException ignored) {
                     // User already exists from a previous run – fine.
                 }

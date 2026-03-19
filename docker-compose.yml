@@ -31,10 +31,15 @@ services:
       NEO4J_dbms_security_allow__csv__import__from__file__urls: "true"
 
       # Permit our ExtensionFactory to be loaded by the kernel:
-      NEO4J_dbms_security_procedures_allowlist: "com.example.neo4j.*"
+      NEO4J_dbms_security_procedures_allowlist: "com.mappedsky.neo4j.*"
 
-      # --- Extra Java options (optional) ---
-      # NEO4J_server_jvm_additional: "-Xss2m"
+      # --- Extra Java options ---
+      # Load the system-database guard agent (blocks CREATE/DROP/ALTER USER for
+      # non-_admin users).  Set this to the path of the agent JAR inside the
+      # plugins volume (e.g. neo4j-read-only-plugin-*-agent.jar).
+      # When using the neo4j-with-plugin service below, this is already
+      # configured automatically by the multi-stage Dockerfile.
+      # NEO4J_server_jvm_additional: "-javaagent:/var/lib/neo4j/plugins/neo4j-read-only-plugin-1.0-SNAPSHOT-agent.jar"
 
     volumes:
       # Plugin JAR built by plugin-builder (or by `mvn package` on the host)
@@ -60,7 +65,7 @@ services:
     environment:
       NEO4J_AUTH: neo4j/changeme
       NEO4J_dbms_security_procedures_unrestricted: "*"
-      NEO4J_dbms_security_procedures_allowlist: "com.example.neo4j.*"
+      NEO4J_dbms_security_procedures_allowlist: "com.mappedsky.neo4j.*"
     volumes:
       - neo4j-data:/data
       - neo4j-logs:/logs

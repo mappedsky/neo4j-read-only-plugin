@@ -45,6 +45,18 @@
             <scope>provided</scope>
         </dependency>
 
+        <!-- Byte Buddy – used by the system-guard agent to instrument Neo4j internals -->
+        <dependency>
+            <groupId>net.bytebuddy</groupId>
+            <artifactId>byte-buddy</artifactId>
+            <version>1.14.18</version>
+        </dependency>
+        <dependency>
+            <groupId>net.bytebuddy</groupId>
+            <artifactId>byte-buddy-agent</artifactId>
+            <version>1.14.18</version>
+        </dependency>
+
         <!-- ── Unit / harness tests ──────────────────────────────────────── -->
         <dependency>
             <groupId>org.junit.jupiter</groupId>
@@ -122,32 +134,75 @@
                 <configuration>
                     <systemPropertyVariables>
                         <!--
-                            Path to the plugin JAR mounted into the test container.
-                            The -plugin classifier is the shaded jar produced by maven-shade-plugin.
+                            Paths to the plugin and agent JARs mounted into the test container.
+                            The -plugin and -agent classifiers are produced by maven-shade-plugin.
                         -->
                         <plugin.jar.path>${project.build.directory}/${project.artifactId}-${project.version}-plugin.jar</plugin.jar.path>
+                        <agent.jar.path>${project.build.directory}/${project.artifactId}-${project.version}-agent.jar</agent.jar.path>
                     </systemPropertyVariables>
                 </configuration>
             </plugin>
 
-            <!-- Produce a single fat-jar for easy deployment to plugins/ -->
+            <!-- Produce shaded JARs for plugin and agent deployment -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-shade-plugin</artifactId>
                 <version>3.5.2</version>
                 <executions>
+                    <!-- ── Plugin JAR (deployed to plugins/, no -javaagent) ──────── -->
                     <execution>
+                        <id>plugin</id>
                         <phase>package</phase>
                         <goals><goal>shade</goal></goals>
                         <configuration>
-                            <!-- Neo4j classes are already on the server classpath -->
+                            <!-- Neo4j and Byte Buddy classes are not needed in the plugin JAR -->
                             <artifactSet>
                                 <excludes>
                                     <exclude>org.neo4j:*</exclude>
+                                    <exclude>net.bytebuddy:*</exclude>
                                 </excludes>
                             </artifactSet>
                             <shadedArtifactAttached>true</shadedArtifactAttached>
                             <shadedClassifierName>plugin</shadedClassifierName>
+                        </configuration>
+                    </execution>
+
+                    <!-- ── Agent JAR (deployed to plugins/, loaded via -javaagent:) ── -->
+                    <execution>
+                        <id>agent</id>
+                        <phase>package</phase>
+                        <goals><goal>shade</goal></goals>
+                        <configuration>
+                            <!-- Include Byte Buddy; Neo4j is provided at runtime -->
+                            <artifactSet>
+                                <includes>
+                                    <include>net.bytebuddy:byte-buddy</include>
+                                    <include>net.bytebuddy:byte-buddy-agent</include>
+                                </includes>
+                                <excludes>
+                                    <exclude>org.neo4j:*</exclude>
+                                </excludes>
+                            </artifactSet>
+                            <!-- Only agent classes from our source + all of Byte Buddy -->
+                            <filters>
+                                <filter>
+                                    <artifact>com.mappedsky:neo4j-read-only-plugin</artifact>
+                                    <includes>
+                                        <include>com/mappedsky/neo4j/agent/**</include>
+                                    </includes>
+                                </filter>
+                            </filters>
+                            <shadedArtifactAttached>true</shadedArtifactAttached>
+                            <shadedClassifierName>agent</shadedClassifierName>
+                            <transformers>
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                                    <manifestEntries>
+                                        <Premain-Class>com.mappedsky.neo4j.agent.SystemDatabaseGuardAgent</Premain-Class>
+                                        <Can-Retransform-Classes>true</Can-Retransform-Classes>
+                                        <Can-Redefine-Classes>true</Can-Redefine-Classes>
+                                    </manifestEntries>
+                                </transformer>
+                            </transformers>
                         </configuration>
                     </execution>
                 </executions>

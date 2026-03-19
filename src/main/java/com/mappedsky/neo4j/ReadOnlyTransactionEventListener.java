@@ -24,7 +24,8 @@ import org.neo4j.logging.Log;
  */
 public class ReadOnlyTransactionEventListener implements TransactionEventListener<Void> {
 
-    private static final String RW_SUFFIX = "_rw";
+    private static final String RW_SUFFIX    = "_rw";
+    private static final String ADMIN_SUFFIX = "_admin";
 
     private final Log log;
 
@@ -54,10 +55,11 @@ public class ReadOnlyTransactionEventListener implements TransactionEventListene
         String username = data.username();
         logChanges(data, username);
 
-        if (!username.endsWith(RW_SUFFIX)) {
+        if (!username.endsWith(RW_SUFFIX) && !username.endsWith(ADMIN_SUFFIX)) {
             throw new WriteNotAllowedException(
                     "User '" + username + "' is not permitted to perform write operations. "
-                    + "Write access requires a username ending in '" + RW_SUFFIX + "'.");
+                    + "Write access requires a username ending in '" + RW_SUFFIX + "' or '"
+                    + ADMIN_SUFFIX + "'.");
         }
 
         return null;

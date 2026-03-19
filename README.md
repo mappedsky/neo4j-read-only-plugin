@@ -3,12 +3,25 @@
 [![CI](https://github.com/ryan-lane/neo4j-read-only-plugin/actions/workflows/ci.yml/badge.svg)](https://github.com/ryan-lane/neo4j-read-only-plugin/actions/workflows/ci.yml)
 [![GitHub Packages](https://img.shields.io/badge/GitHub%20Packages-neo4j--read--only--plugin-blue?logo=github)](https://github.com/ryan-lane/neo4j-read-only-plugin/packages)
 
-A Neo4j 5.x server plugin that enforces a **username-based write policy** using the [Transaction Event API](https://neo4j.com/docs/java-reference/current/extending-neo4j/transaction-event-api/).
+A Neo4j 5.x server plugin + Java agent that enforces a **username-based access policy** across all databases — including the system database.
 
-- Users whose name ends with `_rw` (e.g. `alice_rw`, `svc_rw`) **may** commit write transactions.
-- Every other user — including the built-in `neo4j` admin — is **blocked** from writing. Their transactions are rolled back and a clear error is returned to the client.
-- All write attempts (allowed or blocked) are **logged** with a per-category change summary.
+The policy is enforced by two components that work together:
+
+| Component | Mechanism | Enforces |
+|---|---|---|
+| **Plugin** (`-plugin.jar`) | `TransactionEventListener.beforeCommit()` | Write access to user-managed databases |
+| **Guard agent** (`-agent.jar`) | Byte Buddy bytecode instrumentation (`-javaagent:`) | Administrative commands (`CREATE USER`, `DROP USER`, `ALTER USER`, etc.) on the system database |
+
+**Username policy:**
+
+| Username suffix | Data DB writes | System DB admin commands |
+|---|---|---|
+| ends with `_admin` (e.g. `ops_admin`) | ✅ allowed | ✅ allowed |
+| ends with `_rw` (e.g. `app_rw`) | ✅ allowed | ❌ blocked |
+| anything else (e.g. `readonly`, `neo4j`) | ❌ blocked | ❌ blocked |
+
 - Read-only queries (`MATCH`, `RETURN`, `CALL db.*`, …) always pass through for every user.
+- All write attempts are **logged** with a per-category change summary.
 
 ---
 
@@ -41,7 +54,7 @@ client → [Cypher query] → Neo4j executes → beforeCommit fires
                               └───────────────────┬───────────────────┘
                                                   │ writes detected
                               ┌───────────────────┴───────────────────┐
-                              │ TransactionData.username() ends _rw?   │
+                              │ username ends _rw or _admin?           │
                               │   yes → log changes, allow commit      │
                               │   no  → throw WriteNotAllowedException │
                               │         (Neo4j rolls back the tx)      │
@@ -86,22 +99,28 @@ Dynamic databases created after Neo4j starts are covered automatically via `Data
 ./mvnw package -DskipTests
 ```
 
-This produces two artifacts in `target/`:
+This produces three artifacts in `target/`:
 
 | File | Purpose |
 |---|---|
 | `neo4j-read-only-plugin-1.0.0-SNAPSHOT.jar` | Thin JAR (no bundled dependencies) |
-| `neo4j-read-only-plugin-1.0.0-SNAPSHOT-plugin.jar` | **Shaded JAR – deploy this one** |
+| `neo4j-read-only-plugin-1.0.0-SNAPSHOT-plugin.jar` | **Shaded plugin JAR – copy to Neo4j `plugins/`** |
+| `neo4j-read-only-plugin-1.0.0-SNAPSHOT-agent.jar` | **Byte Buddy guard agent – load via `-javaagent:`** |
 
-> The shaded `-plugin.jar` bundles any non-Neo4j dependencies. Neo4j's own classes are excluded because they are already on the server classpath.
-
-### 2. Copy the JAR to the Neo4j plugins directory
+### 2. Copy both JARs to the Neo4j plugins directory
 
 ```bash
 cp target/neo4j-read-only-plugin-*-plugin.jar $NEO4J_HOME/plugins/
+cp target/neo4j-read-only-plugin-*-agent.jar  $NEO4J_HOME/plugins/system-guard-agent.jar
 ```
 
-### 3. Restart Neo4j
+### 3. Configure the agent in `neo4j.conf`
+
+```
+server.jvm.additional=-javaagent:/var/lib/neo4j/plugins/system-guard-agent.jar
+```
+
+### 4. Restart Neo4j
 
 ```bash
 $NEO4J_HOME/bin/neo4j restart
@@ -131,25 +150,33 @@ Published JARs are available from [GitHub Packages](https://github.com/ryan-lane
 
 ## User management
 
-Create write-capable users whose names end with `_rw`. Any naming convention before the suffix is fine.
+Three username suffixes control access. Use the built-in `neo4j` user (or any `_admin` user) to create them via the system database.
 
 ```cypher
--- Connect to the system database as admin
+-- Connect to the system database as neo4j (or any _admin user)
 -- (cypher-shell -u neo4j -p <password> -d system)
 
+-- Admin user: may write to data databases AND run admin commands (CREATE USER, etc.)
+CREATE USER ops_admin  SET PASSWORD 'strongpassword' CHANGE NOT REQUIRED;
+
+-- Read-write user: may write to data databases; blocked from admin commands
 CREATE USER app_rw     SET PASSWORD 'strongpassword' CHANGE NOT REQUIRED;
+
+-- Read-only user: no writes, no admin commands
 CREATE USER readonly   SET PASSWORD 'strongpassword' CHANGE NOT REQUIRED;
-CREATE USER reporting  SET PASSWORD 'strongpassword' CHANGE NOT REQUIRED;
 ```
 
-| Username | Can write? | Reason |
-|---|---|---|
-| `app_rw` | ✅ yes | ends with `_rw` |
-| `svc_pipeline_rw` | ✅ yes | ends with `_rw` |
-| `readonly` | ❌ no | no `_rw` suffix |
-| `reporting` | ❌ no | no `_rw` suffix |
-| `svc_rw_admin` | ❌ no | `_rw` is not the suffix |
-| `neo4j` | ❌ no | built-in admin, no `_rw` suffix |
+| Username | Data DB writes | System DB admin commands | Reason |
+|---|---|---|---|
+| `ops_admin` | ✅ yes | ✅ yes | ends with `_admin` |
+| `app_rw` | ✅ yes | ❌ no | ends with `_rw` |
+| `svc_pipeline_rw` | ✅ yes | ❌ no | ends with `_rw` |
+| `readonly` | ❌ no | ❌ no | no recognized suffix |
+| `reporting` | ❌ no | ❌ no | no recognized suffix |
+| `svc_rw_admin` | ✅ yes | ✅ yes | ends with `_admin` |
+| `neo4j` | ❌ no | ✅ yes (bootstrap) | built-in bootstrap user |
+
+> **Note:** The built-in `neo4j` user is allowed to run admin commands (so initial user provisioning works) but is blocked from data database writes by the plugin.
 
 ---
 
@@ -204,7 +231,7 @@ INFO  Write transaction by user 'alice_rw':
 Detailed per-node/relationship/property information is logged at `DEBUG` level. Enable it in `$NEO4J_HOME/conf/user-logs.xml` by setting the plugin package to `DEBUG`:
 
 ```xml
-<logger name="com.example.neo4j" level="DEBUG"/>
+<logger name="com.mappedsky.neo4j" level="DEBUG"/>
 ```
 
 ---
@@ -259,11 +286,12 @@ The test suite has three layers:
 | Unit / harness | `ReadOnlyPluginIT` | embedded Neo4j harness | Username check logic, mock `TransactionData` |
 | E2E policy | `WriteEnforcementIT` | Testcontainers / Docker Compose | Full read-write policy over Bolt, username suffix edge cases |
 | Injection resilience | `CypherInjectionIT` | Testcontainers / Docker Compose | Destructive patterns, payload storage, log injection, SSRF+write |
+| System DB guard | `SystemDatabaseGuardIT` | Testcontainers / Docker Compose | `_admin` admin commands allowed, `_rw`/others blocked, SHOW USERS passes through |
 
 ### Docker Compose (recommended — no local JDK needed)
 
 ```bash
-# Build both images and run all 94 tests
+# Build both images and run all 99 tests
 docker compose -f docker-compose.test.yml run --rm test-runner
 
 # Test reports land on the host at ./failsafe-reports/
@@ -326,26 +354,30 @@ The `CypherInjectionIT` suite confirms that the plugin's transaction-level check
 
 ```
 neo4j-read-only-plugin/
-├── Dockerfile                   # Multi-stage: build plugin → bake into Neo4j image
+├── Dockerfile                   # Multi-stage: build plugin+agent → bake into Neo4j image
 ├── Dockerfile.testrunner        # Maven test-runner image
 ├── docker-compose.yml           # Production-style quick-start
 ├── docker-compose.test.yml      # Integration-test environment
 ├── pom.xml
 └── src/
-    ├── main/java/com/example/neo4j/
+    ├── main/java/com/mappedsky/neo4j/
     │   ├── ReadOnlyPluginExtensionFactory.java   # @ServiceProvider entry point
     │   ├── ReadOnlyPluginExtension.java           # LifecycleAdapter + DatabaseEventListener
-    │   ├── ReadOnlyTransactionEventListener.java  # TransactionEventListener – core policy
-    │   └── WriteNotAllowedException.java          # Checked exception thrown on blocked write
+    │   ├── ReadOnlyTransactionEventListener.java  # TransactionEventListener – data DB policy
+    │   └── WriteNotAllowedException.java          # Exception thrown on blocked write
+    ├── main/java/com/mappedsky/neo4j/agent/
+    │   ├── SystemDatabaseGuardAgent.java          # Java agent premain – Byte Buddy wiring
+    │   └── AdminCommandAdvice.java                # @OnMethodEnter advice – system DB policy
     ├── main/resources/META-INF/services/
     │   └── org.neo4j.kernel.extension.ExtensionFactory  # Service-loader registration
-    └── test/java/com/example/neo4j/
-        ├── ContainerSetup.java       # Shared Neo4j connection (Testcontainers or external)
-        ├── WriteEnforcementIT.java   # E2E policy tests
-        ├── CypherInjectionIT.java    # Injection resilience tests
-        ├── ReadOnlyPluginIT.java     # Unit / harness tests
-        ├── MockTransactionData.java  # TransactionData stub for unit tests
-        └── NoOpLog.java              # Silent Log for unit tests
+    └── test/java/com/mappedsky/neo4j/
+        ├── ContainerSetup.java          # Shared Neo4j connection (Testcontainers or external)
+        ├── WriteEnforcementIT.java      # E2E data-DB policy tests
+        ├── CypherInjectionIT.java       # Injection resilience tests
+        ├── SystemDatabaseGuardIT.java   # System DB guard agent tests
+        ├── ReadOnlyPluginIT.java        # Unit / harness tests
+        ├── MockTransactionData.java     # TransactionData stub for unit tests
+        └── NoOpLog.java                 # Silent Log for unit tests
 ```
 
 ### Key classes
@@ -372,19 +404,19 @@ No action required. When Neo4j creates a new database, `ReadOnlyPluginExtension.
 
 ### Changing the write-permission pattern
 
-The suffix `_rw` is defined as a constant in `ReadOnlyTransactionEventListener`:
+The data-DB write policy is in `ReadOnlyTransactionEventListener.beforeCommit()`. Currently both `_rw` and `_admin` users may write:
 
 ```java
-private static final String RW_SUFFIX = "_rw";
+if (username.endsWith("_rw") || username.endsWith("_admin")) return null;
 ```
 
-Change it there. If you need a more complex rule (e.g., role-based, regex), modify the condition in `beforeCommit()`:
+The system-DB admin-command policy is in `AdminCommandAdvice.onEnter()`. Currently `_admin` users and the built-in `neo4j` user are allowed:
 
 ```java
-if (!username.endsWith(RW_SUFFIX)) {
-    throw new WriteNotAllowedException(…);
-}
+if (username.endsWith("_admin") || "neo4j".equals(username) || username.isEmpty()) return;
 ```
+
+If you need a different rule (e.g., role-based, regex), modify the condition in the relevant class. After changing the agent code, rebuild the agent JAR and redeploy it.
 
 ---
 
@@ -395,7 +427,7 @@ if (!username.endsWith(RW_SUFFIX)) {
 Triggers on every pull request targeting `main`.
 
 1. Builds `neo4j-test` and `test-runner` Docker images using BuildKit with GitHub Actions cache (`type=gha`) to avoid re-downloading Maven dependencies and the Neo4j base layer on unchanged code.
-2. Runs all 94 tests via `docker compose -f docker-compose.test.yml run`.
+2. Runs all 99 tests via `docker compose -f docker-compose.test.yml run`.
 3. Publishes JUnit XML results as inline PR annotations via `dorny/test-reporter`.
 4. Uploads the raw XML as a downloadable artifact.
 5. Always tears down containers and volumes.
@@ -408,7 +440,7 @@ Triggers on every push to `main` (i.e., after a PR is merged).
 
 1. Runs the full test suite (same Docker Compose steps as CI). Publishing is blocked if any test fails.
 2. Sets up Java 17 and configures `~/.m2/settings.xml` for GitHub Packages authentication using `GITHUB_TOKEN`.
-3. Runs `mvn deploy` which publishes both JAR variants to [GitHub Packages](https://github.com/ryan-lane/neo4j-read-only-plugin/packages).
+3. Runs `mvn deploy` which publishes all three JAR variants (thin, `-plugin`, `-agent`) to [GitHub Packages](https://github.com/ryan-lane/neo4j-read-only-plugin/packages).
 
 The `GITHUB_TOKEN` secret is automatically provided by GitHub Actions. No additional secrets configuration is required.
 
@@ -421,7 +453,20 @@ The `GITHUB_TOKEN` secret is automatically provided by GitHub Actions. No additi
 │  Neo4j 5.x process                                              │
 │                                                                  │
 │  ┌─────────────────────────────────────────────────────────┐   │
-│  │  Kernel extension lifecycle                              │   │
+│  │  Guard agent  (-javaagent:system-guard-agent.jar)        │   │
+│  │                                                          │   │
+│  │  SystemDatabaseGuardAgent (premain)                      │   │
+│  │    └─ Byte Buddy: intercepts                             │   │
+│  │         UpdatingSystemCommandExecutionPlanBase           │   │
+│  │           └─ runSpecific() → AdminCommandAdvice          │   │
+│  │                └─ username ends _admin or is neo4j?      │   │
+│  │                     yes → allow admin command            │   │
+│  │                     no  → throw                          │   │
+│  │                           AuthorizationViolationException│   │
+│  └──────────────────────────────────────────────────────────┘  │
+│                                                                  │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │  Kernel extension lifecycle  (-plugin.jar)               │   │
 │  │                                                          │   │
 │  │  ReadOnlyPluginExtensionFactory  (@ServiceProvider)      │   │
 │  │    └─ creates ReadOnlyPluginExtension (LifecycleAdapter) │   │
@@ -434,18 +479,18 @@ The `GITHUB_TOKEN` secret is automatically provided by GitHub Actions. No additi
 │  │           ├─ databaseShutdown() ─ unregisters from DB    │   │
 │  │           └─ stop()   ─── unregisters DatabaseListener   │   │
 │  └──────────────────────────┬────────────────────────────────┘  │
-│                             │ per database                       │
+│                             │ per user-managed database          │
 │  ┌──────────────────────────▼────────────────────────────────┐  │
 │  │  ReadOnlyTransactionEventListener                          │  │
 │  │                                                            │  │
 │  │  beforeCommit(TransactionData, tx, db)                     │  │
-│  │    1. hasWrites(data)?        ── no  → allow               │  │
-│  │    2. logChanges(data, user)  ── INFO + DEBUG              │  │
-│  │    3. username.endsWith("_rw")── yes → allow               │  │
-│  │                                   no  → throw              │  │
-│  │                                         WriteNotAllowed    │  │
-│  │                                         Exception          │  │
-│  │                                         (Neo4j rolls back) │  │
+│  │    1. hasWrites(data)?              ── no  → allow         │  │
+│  │    2. logChanges(data, user)        ── INFO + DEBUG        │  │
+│  │    3. username ends _rw or _admin?  ── yes → allow         │  │
+│  │                                        no  → throw         │  │
+│  │                                              WriteNotAllowed│  │
+│  │                                              Exception      │  │
+│  │                                              (rolls back)   │  │
 │  └────────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -458,10 +503,11 @@ The `GITHUB_TOKEN` secret is automatically provided by GitHub Actions. No additi
 
 | Provides | Does not provide |
 |---|---|
-| Write blocking based on username suffix | Role-based access control (use Neo4j Enterprise RBAC for that) |
-| Audit log of every write transaction | Fine-grained property/label-level restrictions |
-| Coverage of all write operations via `TransactionData` | Protection of the `system` database (Neo4j does not support transaction event listeners there) |
-| Automatic coverage of dynamically created databases | Protection against a compromised Neo4j process itself |
+| Write blocking on user-managed databases (username suffix) | Role-based access control (use Neo4j Enterprise RBAC for that) |
+| Admin command blocking on the system database (`_admin` suffix) | Fine-grained property/label-level restrictions |
+| Audit log of every write transaction | Protection against a compromised Neo4j process itself |
+| Coverage of all write operations via `TransactionData` | |
+| Automatic coverage of dynamically created databases | |
 
 ### Injection resilience
 
@@ -471,7 +517,7 @@ The check operates at the **transaction commit boundary**, after Cypher is parse
 - Storing injection payloads as property values (e.g., `' OR 1=1 RETURN n //`) is treated as an ordinary write: allowed for `_rw` users, blocked for others.
 - The plugin's `logChanges()` method logs **counts** and **entity IDs** only — it does not interpolate property values into log messages, preventing log injection via stored data.
 
-See [`CypherInjectionIT.java`](src/test/java/com/example/neo4j/CypherInjectionIT.java) for the full injection test suite.
+See [`CypherInjectionIT.java`](src/test/java/com/mappedsky/neo4j/CypherInjectionIT.java) for the full injection test suite.
 
 ### Neo4j Community vs Enterprise
 

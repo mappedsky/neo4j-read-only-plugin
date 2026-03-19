@@ -103,9 +103,10 @@ jobs:
           server-username: MAVEN_USERNAME
           server-password: MAVEN_PASSWORD
 
-      # Build and deploy both JARs:
+      # Build and deploy all JARs:
       #   - neo4j-read-only-plugin-<version>.jar          (thin, no deps)
-      #   - neo4j-read-only-plugin-<version>-plugin.jar   (shaded, deploy this to Neo4j)
+      #   - neo4j-read-only-plugin-<version>-plugin.jar   (shaded plugin — deploy to Neo4j plugins/)
+      #   - neo4j-read-only-plugin-<version>-agent.jar    (Byte Buddy guard agent — load via -javaagent:)
       #
       # -Dgithub.repository is interpolated into the distributionManagement URL
       # in pom.xml so this workflow works for any fork without editing pom.xml.
